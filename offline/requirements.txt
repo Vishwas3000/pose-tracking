@@ -1,0 +1,31 @@
+# Core
+numpy>=1.24
+opencv-contrib-python-headless==4.10.0.84
+tqdm>=4.65
+typer>=0.12        # CLI for tools/build_object_bundle.py
+
+# COLMAP I/O
+# (the upstream `read_write_model.py` is pure Python — no extra dep)
+
+# ML — ALIKED + LightGlue
+# Install per their official READMEs since they're not always on PyPI:
+#   git+https://github.com/Shiaoming/ALIKED.git
+#   git+https://github.com/cvg/LightGlue.git
+# We pin via git URLs to avoid version drift.
+git+https://github.com/Shiaoming/ALIKED.git@main
+git+https://github.com/cvg/LightGlue.git@main
+
+# Retrieval (optional — only needed if K > 10 reference views)
+# Choose ONE: DINOv2 via Hugging Face transformers OR MobileNet via torchvision
+transformers>=4.40    # for DINOv2 if used
+# torchvision is already installed via the existing PyTorch venv
+
+# ONNX export + verification
+onnx>=1.16
+onnxruntime>=1.18
+
+# Tests
+pytest>=7.4
+
+# Optional: visualization
+matplotlib>=3.8

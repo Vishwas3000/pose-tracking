@@ -1,63 +1,78 @@
-"""Optional: compute global retrieval features per reference view.
+"""Global retrieval embeddings (DINOv2 ViT-S/14 INT8).
 
-When K (number of reference views) > ~10, a global retrieval embedder
-dramatically speeds up the runtime per-frame matching: instead of running
-LightGlue against ALL K references each frame, we cosine-NN-rank
-references first and only match against the top 2-5.
+Used by the online pipeline to filter the bundle's K reference views down
+to the top-N nearest-by-cosine before brute-force descriptor matching:
 
-Three options, in order of (size, quality):
-  - MobileNetV3-Large penultimate layer  — ~6 MB,  80% retrieval acc
-  - MobileViT-XS                         — ~5 MB,  85% retrieval acc
-  - DINOv2 ViT-S/14 INT8                 — ~22 MB, 95% retrieval acc
+    query frame -> DINOv2 (384-D, L2-normalized)
+    -> cosine vs bundle.ref_global_emb (K × 384)
+    -> top-N indices (typically N=5)
+    -> only run brute-force ALIKED matcher against those N refs
 
-For single-object apps with K ≤ 10, **skip this step entirely** — match
-against all K every frame; it's faster than DINOv2 forward pass + match
-× 2.
+Same module is used at bundle-build time (over reference frames) and at
+inference time (over query frames) so the embedding space stays identical.
 
-See `docs/path_b_implementation_roadmap.md` §5.4 for the full comparison.
+Model: onnx-community/dinov2-small / onnx/model_int8.onnx (24 MB)
+  input  pixel_values  [B, 3, 224, 224] float — ImageNet-normalized RGB
+  output last_hidden_state [B, 257, 384] — token 0 (CLS) is the global embedding
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Protocol
 
 import numpy as np
+import onnxruntime as ort
+from PIL import Image
 
 
-class GlobalEmbedder(Protocol):
-    """Common interface for retrieval embedders."""
-
-    embedding_dim: int
-
-    def embed(self, image_path: Path | str) -> np.ndarray:
-        """Returns an L2-normalized 1D embedding (embedding_dim,)."""
-        ...
+_IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+_IMAGENET_STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+_INPUT_SIZE    = 224         # center crop
+_RESIZE_SHORT  = 256         # resize shortest edge first
+RETRIEVAL_DIM  = 384
 
 
-class MobileNetEmbedder:
-    """Fast, mobile-friendly. Uses MobileNetV3-Large penultimate layer.
+def _preprocess(img: Image.Image) -> np.ndarray:
+    """PIL -> (1, 3, 224, 224) float32, ImageNet-normalized.
 
-    Recommended default for K = 10-30 reference views per object.
+    Matches the preprocessor_config.json from onnx-community/dinov2-small:
+    resize shortest edge to 256 (bicubic), center-crop 224, mean/std normalize.
     """
-    embedding_dim = 1280  # MobileNetV3-Large penultimate
+    img = img.convert("RGB")
+    w, h = img.size
+    scale = _RESIZE_SHORT / min(w, h)
+    new_w = int(round(w * scale))
+    new_h = int(round(h * scale))
+    img = img.resize((new_w, new_h), Image.BICUBIC)
+    left = (new_w - _INPUT_SIZE) // 2
+    top  = (new_h - _INPUT_SIZE) // 2
+    img = img.crop((left, top, left + _INPUT_SIZE, top + _INPUT_SIZE))
 
-    def __init__(self):
-        raise NotImplementedError("Phase 1 task: wrap torchvision MobileNetV3")
-
-    def embed(self, image_path: Path | str) -> np.ndarray:
-        raise NotImplementedError
+    arr = np.asarray(img, dtype=np.float32) / 255.0
+    arr = (arr - _IMAGENET_MEAN) / _IMAGENET_STD
+    arr = arr.transpose(2, 0, 1)[None, ...]
+    return arr.astype(np.float32)
 
 
 class DinoV2Embedder:
-    """Highest-quality retrieval. Use only if K > 50 OR multi-object catalog.
+    """ONNX wrapper. Returns L2-normalized 384-D global embeddings."""
+    embedding_dim = RETRIEVAL_DIM
 
-    ViT-S/14 quantized to INT8 is the mobile-deployable variant.
-    """
-    embedding_dim = 384  # ViT-S/14
-
-    def __init__(self):
-        raise NotImplementedError("Phase 1 task: wrap HF transformers DINOv2")
+    def __init__(self, onnx_path: Path | str,
+                 providers: list[str] | None = None):
+        if providers is None:
+            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        self.session = ort.InferenceSession(str(onnx_path), providers=providers)
+        self.input_name = self.session.get_inputs()[0].name
 
     def embed(self, image_path: Path | str) -> np.ndarray:
-        raise NotImplementedError
+        with Image.open(str(image_path)) as im:
+            tensor = _preprocess(im)
+        out = self.session.run(None, {self.input_name: tensor})[0]   # (1, 257, 384)
+        cls = out[0, 0, :].astype(np.float32)
+        n = np.linalg.norm(cls)
+        return cls / n if n > 0 else cls
+
+    def embed_batch(self, image_paths: list[Path]) -> np.ndarray:
+        """(K, 384) float32 L2-normalized."""
+        return np.stack([self.embed(p) for p in image_paths]).astype(np.float32)

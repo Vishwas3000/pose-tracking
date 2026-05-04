@@ -1,0 +1,16 @@
+annotated-doc==0.0.4
+click==8.3.3
+flatbuffers==25.12.19
+markdown-it-py==4.0.0
+mdurl==0.1.2
+numpy==2.4.4
+onnxruntime-gpu==1.25.1
+opencv-python-headless==4.13.0.92
+packaging==26.2
+pillow==12.2.0
+protobuf==7.34.1
+Pygments==2.20.0
+rich==15.0.0
+shellingham==1.5.4
+tqdm==4.67.3
+typer==0.25.1

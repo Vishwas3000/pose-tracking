@@ -1,71 +1,103 @@
-"""Run ALIKED on reference images.
+"""Run ALIKED on reference images via ONNX Runtime.
 
-ALIKED produces sparse keypoints + 128-D L2-normalized descriptors per
-image. It's the detector-based feature extractor that replaces XFeat in
-this project.
-
-Repo: https://github.com/Shiaoming/ALIKED
-ONNX exports: https://github.com/cvg/LightGlue-ONNX
-
-This module wraps the official PyTorch implementation. We'll add an ONNX
-runtime path later in Phase 2 for parity testing on mobile.
+Model: bukuroo/ALIKED-LightGlue-ONNX  (aliked-n16rot-top1k-640.onnx)
+  input:   image  [1, 3, 640, 640] float32 — letterboxed RGB CHW, [0, 1]
+  outputs: keypoints   [1000, 2]   float32 — NORMALIZED [-1, 1] in input tensor space
+           descriptors [1000, 128] float32 — L2-normalized
+           scores      [1000]      float32 — detection confidence in [0, 1]
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TypedDict
 
 import numpy as np
-import torch
+import onnxruntime as ort
+from PIL import Image
+
+
+MODEL_INPUT = 640
 
 
 class AlikedFeatures(TypedDict):
-    keypoints: np.ndarray   # (N, 2) pixel coords in input image space
-    descriptors: np.ndarray # (N, 128) L2-normalized float32
-    scores: np.ndarray      # (N,) detection confidence
+    keypoints: np.ndarray   # (N, 2) float32 — pixel coords in ORIGINAL image space
+    descriptors: np.ndarray # (N, 128) float32 — L2-normalized
+    scores: np.ndarray      # (N,) float32
+
+
+@dataclass
+class _Letterbox:
+    """Maps original-image pixel coords -> letterboxed canvas pixel coords:
+        x_canvas = x_orig * scale + offset_x
+        y_canvas = y_orig * scale + offset_y
+    The ONNX model outputs normalized coords in [-1, 1] over the canvas.
+    """
+    scale: float
+    offset_x: float
+    offset_y: float
+    canvas: int = MODEL_INPUT
+
+    def normalized_to_original(self, kpts_norm: np.ndarray) -> np.ndarray:
+        """ALIKED [-1, 1] coords -> original-image pixel coords."""
+        half = self.canvas / 2.0
+        x_canvas = (kpts_norm[:, 0] + 1.0) * half
+        y_canvas = (kpts_norm[:, 1] + 1.0) * half
+        out = np.empty_like(kpts_norm, dtype=np.float32)
+        out[:, 0] = (x_canvas - self.offset_x) / self.scale
+        out[:, 1] = (y_canvas - self.offset_y) / self.scale
+        return out
+
+
+def _letterbox(img: Image.Image, target: int = MODEL_INPUT) -> tuple[np.ndarray, _Letterbox]:
+    """Resize preserving aspect ratio, pad to target×target with zeros."""
+    w, h = img.size
+    scale = target / max(w, h)
+    new_w, new_h = round(w * scale), round(h * scale)
+    img_resized = img.resize((new_w, new_h), Image.BILINEAR)
+    canvas = Image.new("RGB", (target, target), (0, 0, 0))
+    off_x = (target - new_w) // 2
+    off_y = (target - new_h) // 2
+    canvas.paste(img_resized, (off_x, off_y))
+    arr = np.asarray(canvas, dtype=np.float32) / 255.0     # (H, W, 3) in [0, 1]
+    arr = arr.transpose(2, 0, 1)[None, ...]                 # (1, 3, H, W)
+    return arr, _Letterbox(scale=scale, offset_x=off_x, offset_y=off_y)
 
 
 class AlikedRunner:
-    """Wraps the official ALIKED model for batched inference on reference images.
-
-    Usage:
-        aliked = AlikedRunner(top_k=1024, threshold=0.005)
-        feats = aliked.extract("path/to/image.png")
-        # feats["keypoints"]: (N, 2)
-        # feats["descriptors"]: (N, 128)  L2-normalized
-    """
+    """ONNX Runtime wrapper for ALIKED. Returns keypoints in ORIGINAL image space."""
 
     def __init__(
         self,
-        model_name: str = "aliked-n16",       # 'aliked-n16' is the standard mobile variant
-        top_k: int = 1024,
-        threshold: float = 0.005,
-        device: str = "auto",
+        onnx_path: Path | str,
+        score_threshold: float = 0.0,
+        providers: list[str] | None = None,
     ):
-        self.top_k = top_k
-        self.threshold = threshold
-        self.device = self._resolve_device(device)
-        # TODO: import from the installed `aliked` package once requirements.txt installs work
-        # from aliked import ALIKED
-        # self.model = ALIKED(model_name=model_name, top_k=top_k,
-        #                     detection_threshold=threshold, device=self.device)
-        raise NotImplementedError("Phase 1 task: wire up the ALIKED model")
+        if providers is None:
+            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        self.session = ort.InferenceSession(str(onnx_path), providers=providers)
+        self.score_threshold = score_threshold
+        self.input_name = self.session.get_inputs()[0].name
 
     def extract(self, image_path: Path | str) -> AlikedFeatures:
-        """Run ALIKED on one image and return its features."""
-        raise NotImplementedError
+        with Image.open(str(image_path)) as im:
+            img = im.convert("RGB")
+            orig_size = img.size  # (W, H)
+            tensor, lb = _letterbox(img)
+        kpts, descs, scores = self.session.run(None, {self.input_name: tensor})
+        kpts = lb.normalized_to_original(kpts)
 
-    def extract_batch(self, image_paths: list[Path]) -> list[AlikedFeatures]:
-        """Run ALIKED on multiple images. Default impl: loop. Override for batched ANE/GPU."""
-        return [self.extract(p) for p in image_paths]
-
-    @staticmethod
-    def _resolve_device(device: str) -> str:
-        if device != "auto":
-            return device
-        if torch.cuda.is_available():
-            return "cuda"
-        if torch.backends.mps.is_available():
-            return "mps"
-        return "cpu"
+        # Filter: keep only kpts within original-image bounds and above threshold.
+        # ALIKED pads to a fixed top-K (1000); padding rows have score≈0.
+        w, h = orig_size
+        in_bounds = (
+            (kpts[:, 0] >= 0) & (kpts[:, 0] < w)
+            & (kpts[:, 1] >= 0) & (kpts[:, 1] < h)
+        )
+        keep = in_bounds & (scores >= self.score_threshold)
+        return {
+            "keypoints":   kpts[keep].astype(np.float32),
+            "descriptors": descs[keep].astype(np.float32),
+            "scores":      scores[keep].astype(np.float32),
+        }

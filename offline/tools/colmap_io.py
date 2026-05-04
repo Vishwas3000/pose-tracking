@@ -22,22 +22,9 @@ from typing import NamedTuple
 
 import numpy as np
 
-# Locate the upstream reader. If the OnePose_Plus_Plus repo isn't accessible,
-# vendor the read_write_model.py file directly into this folder as a fallback.
-_UPSTREAM = Path(
-    "/Users/sudeepsharma/Documents/GitHub/OnePose_Plus_Plus/src/utils/colmap"
-)
-if _UPSTREAM.exists():
-    sys.path.insert(0, str(_UPSTREAM))
-else:
-    raise ImportError(
-        f"Cannot find upstream COLMAP reader at {_UPSTREAM}. "
-        "Vendor read_write_model.py into pose-tracker/offline/tools/_colmap_upstream.py "
-        "or update the path."
-    )
-
-# After sys.path manipulation, this import resolves to the upstream module
-import read_write_model as _upstream  # noqa: E402
+# Vendored from colmap/colmap@3.9.1: scripts/python/read_write_model.py.
+# Keeps Phase 1 self-contained — no dependency on a separate COLMAP source tree.
+from . import _colmap_upstream as _upstream  # noqa: E402
 
 
 class ColmapModel(NamedTuple):
@@ -54,14 +41,6 @@ def read_model(workspace_dir: Path) -> ColmapModel:
     workspace_dir = Path(workspace_dir)
     cameras, images, points3D = _upstream.read_model(str(workspace_dir), ext=".bin")
     return ColmapModel(cameras=cameras, images=images, points3D=points3D)
-
-
-def read_bbox(bbox_path: Path) -> np.ndarray:
-    """Read box3d_corners.txt — expected to be 8 rows × 3 floats."""
-    arr = np.loadtxt(str(bbox_path), dtype=np.float32)
-    if arr.shape != (8, 3):
-        raise ValueError(f"Expected (8, 3) bbox; got {arr.shape}")
-    return arr
 
 
 def pose_from_qvec_tvec(qvec, tvec) -> np.ndarray:

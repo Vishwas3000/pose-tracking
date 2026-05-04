@@ -1,38 +1,33 @@
 """Phase O orchestrator — builds an object .bundle from a COLMAP workspace.
 
 Pipeline:
-  O1: load COLMAP outputs + source images           (colmap_io)
-  O2: sample K reference views                      (sample_reference_views)
-  O3: ALIKED inference per reference view           (aliked_inference)
-  O4: map ALIKED keypoints → COLMAP 3D point IDs    (this file, _associate_kpts_to_3d)
-  O5: optional global retrieval features            (retrieval_features)
-  O6: pack everything into custom .bundle           (bundle_writer)
+  O1: load COLMAP outputs + bbox + source images
+  O2: filter points3D inside the oriented bbox; sample K reference views
+  O3: ALIKED inference per reference view  (ONNX Runtime)
+  O4: map ALIKED keypoints -> COLMAP 3D point IDs (2D NN within max-px)
+  O5: optional global retrieval features  (skipped — K is small)
+  O6: pack everything into custom .bundle
 
 USAGE:
-    python -m tools.build_object_bundle \
-        --colmap-dir    /path/to/sfm_workspace \
-        --source-images /path/to/source_images \
-        --bbox          /path/to/bbox3d_corners.txt \
-        --num-refs      30 \
+    python -m tools.build_object_bundle \\
+        --colmap-dir    /path/to/workspace/sparse/cropped_bin \\
+        --source-images /path/to/workspace/images \\
+        --bbox          /path/to/workspace/bounds.json \\
+        --aliked-onnx   ../shared/models/aliked-n16rot-top1k-640.onnx \\
+        --num-refs      30 \\
         --out           ../shared/objects/test_object.bundle
-
-Reads the FULL COLMAP workspace (cameras.bin, images.bin, points3D.bin).
-If you only have OnePose++'s post-processed `anno_3d_average.npz`, this
-pipeline cannot run — re-run SfM to get the COLMAP outputs.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import typer
 
-# TODO: import siblings once implemented
-# from . import colmap_io
-# from . import sample_reference_views
-# from . import aliked_inference
-# from . import retrieval_features
-# from . import bundle_writer
+from . import bounds, bundle_writer, colmap_io, sample_reference_views
+from .aliked_inference import AlikedRunner
+from .retrieval_features import DinoV2Embedder
 
 
 app = typer.Typer(add_completion=False)
@@ -40,76 +35,112 @@ app = typer.Typer(add_completion=False)
 
 @app.command()
 def main(
-    colmap_dir: Path = typer.Option(..., help="COLMAP workspace (cameras.bin, images.bin, points3D.bin)"),
+    colmap_dir: Path = typer.Option(..., help="COLMAP sparse model dir (cameras.bin / images.bin / points3D.bin)"),
     source_images: Path = typer.Option(..., help="Folder of source images used during SfM"),
-    bbox: Path = typer.Option(..., help="bbox3d_corners.txt — 8 lines × 3 floats"),
+    bbox: Path = typer.Option(..., help="bounds.json — oriented AABB (center / extents / rotation)"),
+    aliked_onnx: Path = typer.Option(..., help="Path to ALIKED ONNX model"),
     out: Path = typer.Option(..., help="Output .bundle path"),
     num_refs: int = typer.Option(30, help="Number of reference views to sample"),
-    skip_retrieval: bool = typer.Option(False, help="Skip global retrieval features"),
-    aliked_top_k: int = typer.Option(1024, help="Max keypoints per reference view"),
-    aliked_threshold: float = typer.Option(0.005, help="ALIKED detection threshold"),
+    kpt_match_px: float = typer.Option(3.0, help="Max distance (orig px) ALIKED kpt -> COLMAP-tracked kpt"),
+    aliked_score_min: float = typer.Option(0.0, help="ALIKED score floor (0 = keep all in-bounds)"),
+    dinov2_onnx: Path = typer.Option(None, help="Path to DINOv2 ONNX model (enables retrieval embeddings)"),
 ):
     """Build an object .bundle from a COLMAP/SfM workspace."""
     typer.echo(f"=== build_object_bundle ===")
-    typer.echo(f"colmap_dir   : {colmap_dir}")
-    typer.echo(f"source_images: {source_images}")
-    typer.echo(f"bbox         : {bbox}")
-    typer.echo(f"out          : {out}")
-    typer.echo(f"num_refs     : {num_refs}")
 
-    # --- O1: Load COLMAP workspace ---
-    # cameras, images, points3D = colmap_io.read_model(colmap_dir)
-    # bbox3d = colmap_io.read_bbox(bbox)
-    # typer.echo(f"Loaded COLMAP: {len(images)} frames, {len(points3D)} 3D points")
-    raise NotImplementedError("Phase 1 — implement colmap_io first")
+    # --- O1 / O2 --- load + bbox filter -----------------------------------
+    model = colmap_io.read_model(colmap_dir)
+    bnd = bounds.load_bounds(bbox)
+    typer.echo(f"Loaded COLMAP: {len(model.images)} images, {len(model.points3D)} 3D points")
 
-    # --- O2: Sample reference views ---
-    # ref_image_ids = sample_reference_views.farthest_point_sphere(
-    #     images, points3D, k=num_refs
-    # )
+    pt3d_keys = sorted(model.points3D.keys())
+    pt3d_xyz = np.stack([model.points3D[k].xyz for k in pt3d_keys])
+    inside = bounds.inside_box(pt3d_xyz, bnd)
+    pt3d_keys = [k for k, m in zip(pt3d_keys, inside) if m]
+    pt3d_xyz = pt3d_xyz[inside].astype(np.float32)
+    # Map COLMAP point3D_id -> dense [0, M) index (used in ref blocks).
+    pt3d_id_to_idx = {pid: i for i, pid in enumerate(pt3d_keys)}
+    typer.echo(f"After bbox filter: {len(pt3d_keys)} / {inside.size} 3D points")
 
-    # --- O3: ALIKED inference per reference ---
-    # aliked = aliked_inference.AlikedRunner(top_k=aliked_top_k, threshold=aliked_threshold)
-    # ref_features = {}  # image_id → {'keypoints': (N,2), 'descriptors': (N,128)}
-    # for img_id in ref_image_ids:
-    #     img_path = source_images / images[img_id].name
-    #     ref_features[img_id] = aliked.extract(img_path)
+    ref_image_ids = sample_reference_views.farthest_point_sphere(model, k=num_refs)
+    typer.echo(f"Sampled {len(ref_image_ids)} reference views via viewpoint-sphere FPS")
 
-    # --- O4: Map ALIKED keypoints to COLMAP 3D point IDs ---
-    # ref_pkg = []
-    # for img_id in ref_image_ids:
-    #     ak = ref_features[img_id]
-    #     ck = images[img_id]   # COLMAP-tracked 2D keypoints + 3D point IDs
-    #     pt3d_indices = _associate_kpts_to_3d(ak["keypoints"], ck.xys, ck.point3D_ids)
-    #     # Filter ALIKED keypoints with no nearby 3D match
-    #     ref_pkg.append({"image_id": img_id, "keypoints": ..., "descriptors": ...,
-    #                     "pt3d_indices": ..., "pose": _pose_from_qvec_tvec(ck.qvec, ck.tvec)})
+    # --- O3 / O4 --- ALIKED + 2D NN to COLMAP-tracked keypoints -----------
+    runner = AlikedRunner(aliked_onnx, score_threshold=aliked_score_min)
+    refs: list[bundle_writer.ReferenceView] = []
+    cam = next(iter(model.cameras.values()))
+    K_intr = colmap_io.camera_intrinsics(cam)
 
-    # --- O5: Optional global retrieval features ---
-    # if not skip_retrieval:
-    #     embedder = retrieval_features.MobileNetEmbedder()  # or DINOv2
-    #     for ref in ref_pkg:
-    #         ref["global_emb"] = embedder.embed(...)
+    for img_id in ref_image_ids:
+        img = model.images[img_id]
+        feats = runner.extract(source_images / img.name)
+        kpts_aliked = feats["keypoints"]              # (Na, 2)
+        descs       = feats["descriptors"]            # (Na, 128)
 
-    # --- O6: Pack bundle ---
-    # bundle_writer.write(
-    #     out_path=out,
-    #     points3d=np.stack([p.xyz for p in points3D.values()]),
-    #     bbox3d=bbox3d,
-    #     ref_pkg=ref_pkg,
-    # )
-    # typer.echo(f"✓ wrote bundle: {out}")
+        # COLMAP-tracked 2D points for THIS image, with a valid 3D association
+        # AND that 3D point survived the bbox crop.
+        col_xy   = img.xys                             # (Nc, 2)
+        col_p3d  = img.point3D_ids                     # (Nc,) int — -1 = no 3D
+        valid_c  = np.array([(p != -1 and p in pt3d_id_to_idx) for p in col_p3d])
+        col_xy_v   = col_xy[valid_c]
+        col_p3d_v  = col_p3d[valid_c]
+        if len(col_xy_v) == 0:
+            continue
 
+        # Brute-force 2D NN: distances Na × Nc — Nc is small here (~hundreds)
+        d2 = ((kpts_aliked[:, None, :] - col_xy_v[None, :, :]) ** 2).sum(-1)
+        nn_idx = d2.argmin(axis=1)
+        nn_d   = np.sqrt(d2[np.arange(len(kpts_aliked)), nn_idx])
+        keep   = nn_d <= kpt_match_px
+        if keep.sum() == 0:
+            continue
 
-def _associate_kpts_to_3d(aliked_xy, colmap_xy, colmap_pt3d_ids, max_dist_px: float = 3.0):
-    """For each ALIKED keypoint, find the nearest COLMAP-tracked 2D point and
-    inherit its 3D point ID. Returns array of point3D indices (or -1 for no match)."""
-    raise NotImplementedError
+        kept_kpts  = kpts_aliked[keep]
+        kept_descs = descs[keep]
+        kept_pt3d_dense = np.array([pt3d_id_to_idx[col_p3d_v[i]] for i in nn_idx[keep]],
+                                    dtype=np.uint32)
 
+        # 4×4 world->camera pose
+        from . import _colmap_upstream as _u
+        R = _u.qvec2rotmat(img.qvec)
+        pose = np.eye(4, dtype=np.float32)
+        pose[:3, :3] = R
+        pose[:3, 3]  = img.tvec
 
-def _pose_from_qvec_tvec(qvec, tvec):
-    """Convert COLMAP's (quaternion, translation) to a 4×4 pose matrix."""
-    raise NotImplementedError
+        refs.append(bundle_writer.ReferenceView(
+            image_id=int(img_id),
+            keypoints=kept_kpts.astype(np.float32),
+            descriptors=kept_descs.astype(np.float32),
+            pt3d_indices=kept_pt3d_dense,
+            pose=pose,
+            K=K_intr.astype(np.float32),
+        ))
+        typer.echo(f"  ref img {img_id} ({img.name}): {len(kpts_aliked):4d} ALIKED → {keep.sum():4d} matched 3D")
+
+    if not refs:
+        raise RuntimeError("No reference views produced any 3D matches — check kpt_match_px or bbox.")
+
+    # --- O5 --- DINOv2 retrieval embeddings (optional) ---------------------
+    ref_global_emb = None
+    if dinov2_onnx is not None:
+        typer.echo(f"\nDINOv2 retrieval embeddings ({dinov2_onnx.name}) ...")
+        embedder = DinoV2Embedder(dinov2_onnx)
+        emb_paths = [source_images / model.images[r.image_id].name for r in refs]
+        ref_global_emb = embedder.embed_batch(emb_paths)
+        typer.echo(f"  shape={ref_global_emb.shape}  dtype={ref_global_emb.dtype}  "
+                   f"L2-norm avg={np.linalg.norm(ref_global_emb, axis=1).mean():.4f}")
+
+    # --- O6 --- pack -------------------------------------------------------
+    bundle = bundle_writer.Bundle(
+        points3d=pt3d_xyz,
+        bbox3d=bounds.corners(bnd),
+        ref_global_emb=ref_global_emb,
+        refs=refs,
+    )
+    bundle_writer.write(out, bundle)
+    typer.echo(f"\n✓ wrote bundle: {out}")
+    typer.echo(f"  size: {Path(out).stat().st_size / 1024:.1f} KB")
+    bundle_writer.inspect(out)
 
 
 if __name__ == "__main__":

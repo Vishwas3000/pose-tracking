@@ -8,6 +8,9 @@ venv/
 
 *.zip
 
+flamcam@1234#
+flamcam@1234#.pub
+
 # Models (large; downloaded separately)
 shared/models/
 *.onnx

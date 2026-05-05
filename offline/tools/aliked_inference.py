@@ -17,6 +17,10 @@ import numpy as np
 import onnxruntime as ort
 from PIL import Image
 
+# Make CUDA libs from nvidia-* pip wheels visible to ORT (no-op pre-1.20).
+if hasattr(ort, "preload_dlls"):
+    ort.preload_dlls()
+
 
 MODEL_INPUT = 640
 

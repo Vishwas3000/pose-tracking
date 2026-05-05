@@ -44,8 +44,9 @@ class PoseTracker:
                  reproj_err_px: float = 8.0,
                  retrieval_top_n: int = 5):
         self.bundle: Bundle = load(bundle_path)
-        self.runner = AlikedRunner(aliked_onnx,
-                                   providers=["CPUExecutionProvider"])
+        # Prefer CUDA EP if available (nvidia-* pip wheels in the venv supply
+        # the runtime libs); fall through to CPU if not.
+        self.runner = AlikedRunner(aliked_onnx)
 
         # DINOv2 retrieval — enabled only if (a) caller passed a model and
         # (b) the bundle actually has retrieval embeddings.
@@ -53,8 +54,7 @@ class PoseTracker:
         self.retrieval_top_n = retrieval_top_n
         if dinov2_onnx is not None and self.bundle.ref_global_emb is not None:
             from .retrieval import DinoV2Embedder
-            self.embedder = DinoV2Embedder(
-                dinov2_onnx, providers=["CPUExecutionProvider"])
+            self.embedder = DinoV2Embedder(dinov2_onnx)
 
         self.ratio = ratio
         self.sim_min = sim_min

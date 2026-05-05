@@ -24,6 +24,9 @@ import numpy as np
 import onnxruntime as ort
 from PIL import Image
 
+if hasattr(ort, "preload_dlls"):
+    ort.preload_dlls()
+
 
 _IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 _IMAGENET_STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)

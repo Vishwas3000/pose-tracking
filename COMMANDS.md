@@ -14,10 +14,16 @@ working directory is the repo root: `/davidRavi/pose-tracking/`.
 colmap -h | head -2          # → "COLMAP 4.0.4 ... with CUDA"
 
 # Python venv (lives at repo root, gitignored)
-python3 -m venv .venv
+# IMPORTANT: build against /venv/main/bin/python, not the system /usr/bin/python3
+# — the system binary on this container has ABI-mismatched extensions that
+# break ctypes / ORT preload_dlls.
+/venv/main/bin/python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-# .venv must be active for every command below.
+# requirements.txt pins: pillow, numpy, opencv, onnxruntime-gpu, typer, tqdm,
+# and CUDA 12 runtime libs as nvidia-* pip wheels. ORT auto-finds them via
+# preload_dlls() so CUDAExecutionProvider works on the RTX 4090 without
+# touching the system CUDA 13 toolkit COLMAP needs. ~1.5 GB extra in .venv.
 
 # Pre-trained models (already in shared/models/)
 ls shared/models/
@@ -175,6 +181,32 @@ python3 -m online.demo.test_images \
     --out-dir  offline/data/test_images_infered_dino \
     --ref-size 1920x1440
 ```
+
+### 2e. Run on a video file
+
+```bash
+# Build a test clip from session frames (skip if you already have a video)
+ffmpeg -y -framerate 30 -i offline/data/session_1777549127/frames/frame_%04d.jpg \
+    -vframes 200 -c:v libx264 -pix_fmt yuv420p -preset veryfast \
+    offline/data/session_1777549127.mp4
+
+# Process it. --stride 2 halves compute and carries the last drawn pose
+# forward on skipped frames so the output stays at full source fps.
+python3 -m online.demo.video \
+    --bundle  shared/objects/session_1777549127.bundle \
+    --aliked  shared/models/aliked-n16rot-top1k-640.onnx \
+    --video   offline/data/session_1777549127.mp4 \
+    --out     offline/data/session_1777549127_tracked.mp4 \
+    --stride  2
+
+# With DINOv2 retrieval:
+#   --dinov2 shared/models/dinov2-small-int8.onnx --top-n 5
+# Cap input frames during testing:
+#   --max-frames 100
+```
+
+Outputs an annotated MP4 plus a `.csv` with per-frame match/inlier counts.
+Reads via `cv2.VideoCapture`, writes via `mp4v` codec.
 
 Reads with `cv2.IMREAD_IGNORE_ORIENTATION` so EXIF rotation is **not**
 applied — keeps drawing in the same coordinate frame ALIKED operates in.

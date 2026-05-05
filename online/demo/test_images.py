@@ -42,13 +42,33 @@ IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
 
 def scale_K(K_ref: np.ndarray, ref_size: tuple[int, int],
             tgt_size: tuple[int, int]) -> np.ndarray:
-    """Linearly scale the camera matrix from ref_size (W,H) to tgt_size (W,H).
-    Assumes the same field of view at both resolutions."""
-    sx = tgt_size[0] / ref_size[0]
-    sy = tgt_size[1] / ref_size[1]
+    """Scale the camera matrix from ref_size (W,H) to tgt_size (W,H).
+
+    Same aspect ratio  -> simple proportional scaling.
+    Different aspect   -> assume square pixels + center-vertical-crop
+                          (matches iPhone main-cam behaviour going from
+                           4:3 ARKit video to 16:9 photo/video modes).
+    """
+    rw, rh = ref_size
+    tw, th = tgt_size
+    sx = tw / rw
     K = K_ref.astype(np.float64).copy()
-    K[0, 0] *= sx;  K[0, 2] *= sx
-    K[1, 1] *= sy;  K[1, 2] *= sy
+    K[0, 0] *= sx          # fx
+    K[0, 2] *= sx          # cx
+
+    same_aspect = abs((rw * th) - (rh * tw)) < max(rw, rh) * 0.01
+    if same_aspect:
+        sy = th / rh
+        K[1, 1] *= sy
+        K[1, 2] *= sy
+    else:
+        # Square pixels -> fy after scaling equals fx after scaling.
+        K[1, 1] = K[0, 0]
+        # Imagine the source extended to the bundle's width: at that width
+        # it would be `h_inferred` tall; the visible area is a center crop.
+        h_inferred = th * (rw / tw)
+        cy_at_inferred = K_ref[1, 2] - (rh - h_inferred) / 2.0
+        K[1, 2] = cy_at_inferred * (th / h_inferred)
     return K
 
 

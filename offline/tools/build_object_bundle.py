@@ -27,7 +27,7 @@ import typer
 
 from . import bounds, bundle_writer, colmap_io, sample_reference_views
 from .xfeat_inference import XFeatRunner
-from .retrieval_features import DinoV2Embedder
+from .retrieval_features import DinoV2Embedder, DinoV2EmbedderPT
 
 
 app = typer.Typer(add_completion=False)
@@ -44,7 +44,8 @@ def main(
     kpt_match_px: float = typer.Option(3.0, help="Max distance (orig px) XFeat kpt -> COLMAP-tracked kpt"),
     xfeat_score_min: float = typer.Option(0.0, help="XFeat score floor (0 = keep all in-bounds)"),
     xfeat_top_k: int = typer.Option(1000, help="Top-K XFeat keypoints per image (matches ALIKED's 1000 for parity)"),
-    dinov2_onnx: Path = typer.Option(None, help="Path to DINOv2 ONNX model (enables retrieval embeddings)"),
+    dinov2_onnx: Path = typer.Option(None, help="Path to DINOv2 ONNX (legacy INT8). Bundle must use the same backend the runtime uses."),
+    dinov2_pt:   bool = typer.Option(False, help="Use PyTorch DINOv2 from torch.hub (matches the iOS Core ML mlpackage source). Recommended for new bundles."),
 ):
     """Build an object .bundle from a COLMAP/SfM workspace."""
     typer.echo(f"=== build_object_bundle ===")
@@ -123,8 +124,15 @@ def main(
 
     # --- O5 --- DINOv2 retrieval embeddings (optional) ---------------------
     ref_global_emb = None
-    if dinov2_onnx is not None:
-        typer.echo(f"\nDINOv2 retrieval embeddings ({dinov2_onnx.name}) ...")
+    if dinov2_pt:
+        typer.echo(f"\nDINOv2 retrieval embeddings (PyTorch torch.hub — matches iOS mlpackage) ...")
+        embedder = DinoV2EmbedderPT()
+        emb_paths = [source_images / model.images[r.image_id].name for r in refs]
+        ref_global_emb = embedder.embed_batch(emb_paths)
+        typer.echo(f"  shape={ref_global_emb.shape}  dtype={ref_global_emb.dtype}  "
+                   f"L2-norm avg={np.linalg.norm(ref_global_emb, axis=1).mean():.4f}")
+    elif dinov2_onnx is not None:
+        typer.echo(f"\nDINOv2 retrieval embeddings (legacy ONNX {dinov2_onnx.name}) ...")
         embedder = DinoV2Embedder(dinov2_onnx)
         emb_paths = [source_images / model.images[r.image_id].name for r in refs]
         ref_global_emb = embedder.embed_batch(emb_paths)

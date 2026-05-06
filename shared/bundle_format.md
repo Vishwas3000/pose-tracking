@@ -23,7 +23,7 @@ Integer fields are `uint32` unless noted.
 │  flags            : uint32   = bitfield (bit 0 = has retrieval embs)│
 │  num_points3d     : uint32   = M                                    │
 │  num_refs         : uint32   = K                                    │
-│  desc_dim         : uint32   = 128 (ALIKED descriptor dim)          │
+│  desc_dim         : uint32   = 64 (XFeat) or 128 (legacy ALIKED)    │
 │  retrieval_dim    : uint32   = 0 if no embs, else D_global          │
 │  reserved         : 32 bytes = zeros                                │
 └────────────────────────────────────────────────────────────────────┘
@@ -74,8 +74,8 @@ the Swift/Kotlin readers.
 - `M` (3D points): up to 4 billion in theory; practically 5,000–50,000
 - `K` (reference views): up to 4 billion; practically 20–100
 - `N_k` (keypoints per ref): up to 4 billion; practically 500–2,000
-- `desc_dim`: fixed at 128 for ALIKED; bump file `version` for other
-  values
+- `desc_dim`: 64 for XFeat, 128 for legacy ALIKED — version unchanged
+  since the reader is dim-aware (reads `desc_dim` from the header)
 
 ## Future extensions
 

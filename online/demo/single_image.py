@@ -3,7 +3,7 @@
 Usage (from repo root):
     python -m online.demo.single_image \\
         --bundle    shared/objects/session_1777549127.bundle \\
-        --aliked    shared/models/aliked-n16rot-top1k-640.onnx \\
+        --xfeat     shared/models/xfeat.pt \\
         --image     offline/data/session_1777549127/frames/frame_0210.jpg \\
         --metadata  offline/data/session_1777549127/metadata/metadata_0210.json
 """
@@ -43,15 +43,15 @@ def _pose_error(P_est: np.ndarray, P_gt: np.ndarray) -> tuple[float, float]:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bundle",   required=True, type=Path)
-    ap.add_argument("--aliked",   required=True, type=Path)
+    ap.add_argument("--xfeat",    required=True, type=Path)
     ap.add_argument("--image",    required=True, type=Path)
     ap.add_argument("--metadata", default=None, type=Path,
                     help="Optional: ARKit metadata JSON for ground-truth comparison.")
     args = ap.parse_args()
 
     print(f"Loading bundle  : {args.bundle}")
-    print(f"Loading model   : {args.aliked}")
-    tracker = PoseTracker(args.bundle, args.aliked)
+    print(f"Loading model   : {args.xfeat}")
+    tracker = PoseTracker(args.bundle, args.xfeat)
     print(f"  M (3D points) : {len(tracker.bundle.points3d)}")
     print(f"  K (refs)      : {len(tracker.bundle.refs)}")
     print(f"  K_intrinsics  : fx={tracker.K[0,0]:.1f}  cx={tracker.K[0,2]:.1f}  cy={tracker.K[1,2]:.1f}")
@@ -60,7 +60,7 @@ def main():
     t0 = time.perf_counter()
     result = tracker.process(args.image)
     elapsed_ms = 1000 * (time.perf_counter() - t0)
-    print(f"  ALIKED kpts   : {result.n_aliked_kpts}")
+    print(f"  XFeat kpts    : {result.n_kpts}")
     print(f"  matched 2D-3D : {result.n_matches}")
     print(f"  RANSAC inliers: {result.n_inliers}")
     print(f"  elapsed       : {elapsed_ms:.1f} ms")

@@ -1,13 +1,14 @@
 """Frame -> pose orchestrator. Desktop reference for the on-device pipeline.
 
 Per-frame flow:
-  1. ALIKED on the query image -> kpts + 128-D descriptors (ONNX Runtime)
+  1. XFeat on the query image -> kpts + 64-D descriptors (PyTorch)
   2. Brute-force descriptor matching against every reference view in the bundle
      -> a deduped set of (query_kpt, world_xyz) pairs
   3. cv2.solvePnPRansac (EPnP) -> pose + inlier mask
 
-The mobile pipeline will replace step 2 with LightGlue and step 3 with native
-EPnP; the algorithmic flow is identical.
+The mobile pipeline replaces step 1 with a Core ML XFeat runner and step 3
+with the native Swift EPnP in `ios/objectCapture/Inference/EPnP.swift`; the
+algorithmic flow is identical.
 """
 
 from __future__ import annotations
@@ -17,11 +18,11 @@ from pathlib import Path
 
 import numpy as np
 
-# Re-use the offline ALIKED runner so we don't drift between train/test paths.
+# Re-use the offline XFeat runner so we don't drift between train/test paths.
 import sys
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT))
-from offline.tools.aliked_inference import AlikedRunner  # noqa: E402
+from offline.tools.xfeat_inference import XFeatRunner    # noqa: E402
 
 from .bundle_loader import Bundle, load                  # noqa: E402
 from .matcher import match_query_to_bundle               # noqa: E402
@@ -33,20 +34,25 @@ class FrameResult:
     pose: np.ndarray | None             # (4, 4) world->camera, or None if lost
     n_matches: int
     n_inliers: int
-    n_aliked_kpts: int
+    n_kpts: int
     ref_subset: list[int] | None = None     # ref indices used after DINOv2 filter
 
 
 class PoseTracker:
-    def __init__(self, bundle_path: Path | str, aliked_onnx: Path | str,
+    def __init__(self, bundle_path: Path | str, xfeat_model: Path | str,
                  dinov2_onnx: Path | str | None = None,
-                 ratio: float = 0.85, sim_min: float = 0.5,
+                 # XFeat descriptors are 64-D and tighter than ALIKED's 128-D:
+                 # upstream's recommended cossim threshold is 0.82. Below that
+                 # we get hundreds of false-positive matches that overwhelm
+                 # RANSAC.
+                 ratio: float = 0.9, sim_min: float = 0.82,
                  reproj_err_px: float = 8.0,
-                 retrieval_top_n: int = 5):
+                 retrieval_top_n: int = 5,
+                 top_k: int = 4096):
         self.bundle: Bundle = load(bundle_path)
-        # Prefer CUDA EP if available (nvidia-* pip wheels in the venv supply
-        # the runtime libs); fall through to CPU if not.
-        self.runner = AlikedRunner(aliked_onnx)
+        # XFeat runs on CUDA via PyTorch (nvidia-cu12 pip wheels in the
+        # venv supply the runtime libs).
+        self.runner = XFeatRunner(xfeat_model, top_k=top_k)
 
         # DINOv2 retrieval — enabled only if (a) caller passed a model and
         # (b) the bundle actually has retrieval embeddings.
@@ -82,17 +88,17 @@ class PoseTracker:
         sub_list = ref_subset.tolist() if ref_subset is not None else None
         if len(img_pts) == 0:
             return FrameResult(pose=None, n_matches=0, n_inliers=0,
-                               n_aliked_kpts=len(q_kpts),
+                               n_kpts=len(q_kpts),
                                ref_subset=sub_list)
 
         est = solve_pose(world_pts, img_pts, self.K,
                          reproj_err_px=self.reproj_err_px)
         if est is None:
             return FrameResult(pose=None, n_matches=len(img_pts), n_inliers=0,
-                               n_aliked_kpts=len(q_kpts),
+                               n_kpts=len(q_kpts),
                                ref_subset=sub_list)
 
         return FrameResult(pose=est.pose, n_matches=len(img_pts),
                            n_inliers=len(est.inliers),
-                           n_aliked_kpts=len(q_kpts),
+                           n_kpts=len(q_kpts),
                            ref_subset=sub_list)

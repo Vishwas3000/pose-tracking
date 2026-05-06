@@ -27,7 +27,7 @@ def verify(path: Path, max_reproj_px: float = 2.0) -> bool:
     ok = True
     ok &= _check_format(b)
     ok &= _check_reprojection(b, max_reproj_px)
-    # ok &= _check_round_trip(b)   # requires aliked_inference + matcher to be implemented
+    # ok &= _check_round_trip(b)   # requires xfeat_inference + matcher to be implemented
 
     if ok:
         print("✓ bundle is valid")
@@ -48,7 +48,7 @@ def _check_reprojection(b: Bundle, max_reproj_px: float) -> bool:
 
 def _check_round_trip(b: Bundle) -> bool:
     """Use one ref image as a query against the bundle; verify high inlier count."""
-    raise NotImplementedError("Phase 1 task — requires aliked_inference")
+    raise NotImplementedError("Phase 1 task — requires xfeat_inference")
 
 
 if __name__ == "__main__":

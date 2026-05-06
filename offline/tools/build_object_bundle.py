@@ -3,8 +3,8 @@
 Pipeline:
   O1: load COLMAP outputs + bbox + source images
   O2: filter points3D inside the oriented bbox; sample K reference views
-  O3: ALIKED inference per reference view  (ONNX Runtime)
-  O4: map ALIKED keypoints -> COLMAP 3D point IDs (2D NN within max-px)
+  O3: XFeat inference per reference view  (PyTorch, vendored under _xfeat/)
+  O4: map XFeat keypoints -> COLMAP 3D point IDs (2D NN within max-px)
   O5: optional global retrieval features  (skipped — K is small)
   O6: pack everything into custom .bundle
 
@@ -13,7 +13,7 @@ USAGE:
         --colmap-dir    /path/to/workspace/sparse/cropped_bin \\
         --source-images /path/to/workspace/images \\
         --bbox          /path/to/workspace/bounds.json \\
-        --aliked-onnx   ../shared/models/aliked-n16rot-top1k-640.onnx \\
+        --xfeat-model   ../shared/models/xfeat.pt \\
         --num-refs      30 \\
         --out           ../shared/objects/test_object.bundle
 """
@@ -26,7 +26,7 @@ import numpy as np
 import typer
 
 from . import bounds, bundle_writer, colmap_io, sample_reference_views
-from .aliked_inference import AlikedRunner
+from .xfeat_inference import XFeatRunner
 from .retrieval_features import DinoV2Embedder
 
 
@@ -38,11 +38,12 @@ def main(
     colmap_dir: Path = typer.Option(..., help="COLMAP sparse model dir (cameras.bin / images.bin / points3D.bin)"),
     source_images: Path = typer.Option(..., help="Folder of source images used during SfM"),
     bbox: Path = typer.Option(..., help="bounds.json — oriented AABB (center / extents / rotation)"),
-    aliked_onnx: Path = typer.Option(..., help="Path to ALIKED ONNX model"),
+    xfeat_model: Path = typer.Option(..., help="Path to XFeat PyTorch checkpoint (xfeat.pt)"),
     out: Path = typer.Option(..., help="Output .bundle path"),
     num_refs: int = typer.Option(30, help="Number of reference views to sample"),
-    kpt_match_px: float = typer.Option(3.0, help="Max distance (orig px) ALIKED kpt -> COLMAP-tracked kpt"),
-    aliked_score_min: float = typer.Option(0.0, help="ALIKED score floor (0 = keep all in-bounds)"),
+    kpt_match_px: float = typer.Option(3.0, help="Max distance (orig px) XFeat kpt -> COLMAP-tracked kpt"),
+    xfeat_score_min: float = typer.Option(0.0, help="XFeat score floor (0 = keep all in-bounds)"),
+    xfeat_top_k: int = typer.Option(1000, help="Top-K XFeat keypoints per image (matches ALIKED's 1000 for parity)"),
     dinov2_onnx: Path = typer.Option(None, help="Path to DINOv2 ONNX model (enables retrieval embeddings)"),
 ):
     """Build an object .bundle from a COLMAP/SfM workspace."""
@@ -65,8 +66,8 @@ def main(
     ref_image_ids = sample_reference_views.farthest_point_sphere(model, k=num_refs)
     typer.echo(f"Sampled {len(ref_image_ids)} reference views via viewpoint-sphere FPS")
 
-    # --- O3 / O4 --- ALIKED + 2D NN to COLMAP-tracked keypoints -----------
-    runner = AlikedRunner(aliked_onnx, score_threshold=aliked_score_min)
+    # --- O3 / O4 --- XFeat + 2D NN to COLMAP-tracked keypoints ------------
+    runner = XFeatRunner(xfeat_model, score_threshold=xfeat_score_min, top_k=xfeat_top_k)
     refs: list[bundle_writer.ReferenceView] = []
     cam = next(iter(model.cameras.values()))
     K_intr = colmap_io.camera_intrinsics(cam)
@@ -74,8 +75,8 @@ def main(
     for img_id in ref_image_ids:
         img = model.images[img_id]
         feats = runner.extract(source_images / img.name)
-        kpts_aliked = feats["keypoints"]              # (Na, 2)
-        descs       = feats["descriptors"]            # (Na, 128)
+        kpts_xfeat = feats["keypoints"]               # (Na, 2)
+        descs      = feats["descriptors"]             # (Na, 64)
 
         # COLMAP-tracked 2D points for THIS image, with a valid 3D association
         # AND that 3D point survived the bbox crop.
@@ -88,14 +89,14 @@ def main(
             continue
 
         # Brute-force 2D NN: distances Na × Nc — Nc is small here (~hundreds)
-        d2 = ((kpts_aliked[:, None, :] - col_xy_v[None, :, :]) ** 2).sum(-1)
+        d2 = ((kpts_xfeat[:, None, :] - col_xy_v[None, :, :]) ** 2).sum(-1)
         nn_idx = d2.argmin(axis=1)
-        nn_d   = np.sqrt(d2[np.arange(len(kpts_aliked)), nn_idx])
+        nn_d   = np.sqrt(d2[np.arange(len(kpts_xfeat)), nn_idx])
         keep   = nn_d <= kpt_match_px
         if keep.sum() == 0:
             continue
 
-        kept_kpts  = kpts_aliked[keep]
+        kept_kpts  = kpts_xfeat[keep]
         kept_descs = descs[keep]
         kept_pt3d_dense = np.array([pt3d_id_to_idx[col_p3d_v[i]] for i in nn_idx[keep]],
                                     dtype=np.uint32)
@@ -115,7 +116,7 @@ def main(
             pose=pose,
             K=K_intr.astype(np.float32),
         ))
-        typer.echo(f"  ref img {img_id} ({img.name}): {len(kpts_aliked):4d} ALIKED → {keep.sum():4d} matched 3D")
+        typer.echo(f"  ref img {img_id} ({img.name}): {len(kpts_xfeat):4d} XFeat → {keep.sum():4d} matched 3D")
 
     if not refs:
         raise RuntimeError("No reference views produced any 3D matches — check kpt_match_px or bbox.")

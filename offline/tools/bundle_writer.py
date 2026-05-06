@@ -29,7 +29,7 @@ HAS_RETRIEVAL_BIT = 1
 class ReferenceView:
     image_id: int
     keypoints: np.ndarray           # (N, 2) float32
-    descriptors: np.ndarray         # (N, D) float32 (D = 128 for ALIKED)
+    descriptors: np.ndarray         # (N, D) float32 (D = 64 for XFeat, 128 for legacy ALIKED)
     pt3d_indices: np.ndarray        # (N,) uint32 — index into Bundle.points3d
     pose: np.ndarray                # (4, 4) float32 — world->camera
     K: np.ndarray                   # (3, 3) float32 — camera intrinsics

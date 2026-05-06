@@ -3,7 +3,7 @@
 Usage:
     python -m online.demo.overlay_bbox \\
         --bundle  shared/objects/session_1777549127.bundle \\
-        --aliked  shared/models/aliked-n16rot-top1k-640.onnx \\
+        --xfeat   shared/models/xfeat.pt \\
         --image   offline/data/session_1777549127/frames/frame_0210.jpg \\
         --out     offline/data/overlays/frame_0210_bbox.jpg
 
@@ -85,12 +85,12 @@ def annotate_status(image: np.ndarray, lines: list[str]) -> np.ndarray:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bundle", required=True, type=Path)
-    ap.add_argument("--aliked", required=True, type=Path)
+    ap.add_argument("--xfeat",  required=True, type=Path)
     ap.add_argument("--image",  required=True, type=Path)
     ap.add_argument("--out",    required=True, type=Path)
     args = ap.parse_args()
 
-    tracker = PoseTracker(args.bundle, args.aliked)
+    tracker = PoseTracker(args.bundle, args.xfeat)
 
     # Match the pipeline's PIL-based loader: ignore EXIF so we draw on the raw
     # sensor-orientation pixel array that ALIKED keypoints live in.
@@ -117,7 +117,7 @@ def main():
         out = annotate_status(out, [
             f"{args.image.name}",
             f"matches={result.n_matches}  inliers={result.n_inliers}  "
-            f"kpts={result.n_aliked_kpts}  ({elapsed_ms:.0f} ms)",
+            f"kpts={result.n_kpts}  ({elapsed_ms:.0f} ms)",
         ])
 
     args.out.parent.mkdir(parents=True, exist_ok=True)

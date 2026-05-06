@@ -8,7 +8,7 @@ finds a pose where DLT-PnP fails, the iOS bug is the solver.
 Usage (from repo root, with .venv active):
     python -m online.demo.cross_check_solver \\
         --bundle shared/objects/session_1777549127.bundle \\
-        --aliked shared/models/aliked-n16rot-top1k-640.onnx \\
+        --xfeat  shared/models/xfeat.pt \\
         --image  offline/data/test_images/IMG_9237.JPG
 """
 
@@ -26,7 +26,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT))
 from online.tools.bundle_loader import load                # noqa: E402
 from online.tools.matcher import match_query_to_bundle     # noqa: E402
-from offline.tools.aliked_inference import AlikedRunner    # noqa: E402
+from offline.tools.xfeat_inference import XFeatRunner      # noqa: E402
 from online.demo.test_images import scale_K                # noqa: E402
 
 
@@ -233,7 +233,7 @@ def coplanarity_per_sample(pts3d: np.ndarray, sample_size: int = 8,
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bundle", required=True, type=Path)
-    ap.add_argument("--aliked", required=True, type=Path)
+    ap.add_argument("--xfeat",  required=True, type=Path)
     ap.add_argument("--image",  required=True, type=Path)
     ap.add_argument("--ref-size", default="1920x1440")
     ap.add_argument("--reproj-thresh", type=float, default=8.0)
@@ -244,7 +244,7 @@ def main():
 
     print(f"Loading bundle: {args.bundle}")
     bundle = load(args.bundle)
-    runner = AlikedRunner(args.aliked)
+    runner = XFeatRunner(args.xfeat)
 
     from PIL import Image
     with Image.open(args.image) as im:

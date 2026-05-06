@@ -6,7 +6,7 @@ just with cv2.VideoCapture / VideoWriter instead of folder-of-images I/O.
 Usage:
     python -m online.demo.video \\
         --bundle  shared/objects/session_1777549127.bundle \\
-        --aliked  shared/models/aliked-n16rot-top1k-640.onnx \\
+        --xfeat   shared/models/xfeat.pt \\
         --video   /path/to/input.mp4 \\
         --out     offline/data/video_out.mp4
 
@@ -40,7 +40,7 @@ from online.demo.test_images import scale_K                # noqa: E402
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bundle",   required=True, type=Path)
-    ap.add_argument("--aliked",   required=True, type=Path)
+    ap.add_argument("--xfeat",    required=True, type=Path)
     ap.add_argument("--video",    required=True, type=Path)
     ap.add_argument("--out",      required=True, type=Path)
     ap.add_argument("--dinov2",   default=None, type=Path)
@@ -62,7 +62,7 @@ def main():
     args.out.parent.mkdir(parents=True, exist_ok=True)
 
     print(f"Loading bundle  : {args.bundle.name}")
-    tracker = PoseTracker(args.bundle, args.aliked,
+    tracker = PoseTracker(args.bundle, args.xfeat,
                           dinov2_onnx=args.dinov2,
                           retrieval_top_n=args.top_n)
     print(f"  M={len(tracker.bundle.points3d):,}  K_refs={len(tracker.bundle.refs)}")
@@ -147,7 +147,7 @@ def main():
                 last_drawn_status = [
                     f"{args.video.name}  frame {n_in:>5d}/{src_n}",
                     f"matches={result.n_matches}  inliers={result.n_inliers}  "
-                    f"kpts={result.n_aliked_kpts}  ({ms:.0f} ms)",
+                    f"kpts={result.n_kpts}  ({ms:.0f} ms)",
                     f"fps {fps_now:5.1f}  (rolling 30-frame avg)",
                 ]
             else:
@@ -163,7 +163,7 @@ def main():
                 "ok": result.pose is not None,
                 "matches": result.n_matches,
                 "inliers": result.n_inliers,
-                "kpts": result.n_aliked_kpts,
+                "kpts": result.n_kpts,
                 "elapsed_ms": f"{ms:.1f}",
             })
 

@@ -8,7 +8,7 @@ pose error against ARKit ground-truth metadata.
 Usage:
     python -m online.demo.sweep_session \\
         --bundle  shared/objects/session_1777549127.bundle \\
-        --aliked  shared/models/aliked-n16rot-top1k-640.onnx \\
+        --xfeat   shared/models/xfeat.pt \\
         --session offline/data/session_1777549127 \\
         --out     offline/data/overlays \\
         --stride  5
@@ -54,7 +54,7 @@ def pose_error(P_est: np.ndarray, P_gt: np.ndarray) -> tuple[float, float]:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bundle",  required=True, type=Path)
-    ap.add_argument("--aliked",  required=True, type=Path)
+    ap.add_argument("--xfeat",   required=True, type=Path)
     ap.add_argument("--session", required=True, type=Path,
                     help="iOS session folder with frames/ + metadata/")
     ap.add_argument("--out",     required=True, type=Path)
@@ -66,8 +66,8 @@ def main():
 
     args.out.mkdir(parents=True, exist_ok=True)
 
-    print(f"Loading bundle {args.bundle.name} + model {args.aliked.name} ...")
-    tracker = PoseTracker(args.bundle, args.aliked)
+    print(f"Loading bundle {args.bundle.name} + model {args.xfeat.name} ...")
+    tracker = PoseTracker(args.bundle, args.xfeat)
     print(f"  M={len(tracker.bundle.points3d):,}  K_refs={len(tracker.bundle.refs)}")
 
     frames_dir   = args.session / "frames"
@@ -107,7 +107,7 @@ def main():
                 rot_deg, t_cm = rd, tm * 100
             status = [
                 f"{fp.name}  inliers={result.n_inliers}/{result.n_matches}  "
-                f"kpts={result.n_aliked_kpts}  ({ms:.0f} ms)",
+                f"kpts={result.n_kpts}  ({ms:.0f} ms)",
                 (f"err vs ARKit: rot={rot_deg:.2f} deg  t={t_cm:.2f} cm"
                  if rot_deg is not None else "err vs ARKit: (no metadata)"),
             ]
@@ -127,7 +127,7 @@ def main():
             "ok": result.pose is not None,
             "matches": result.n_matches,
             "inliers": result.n_inliers,
-            "kpts": result.n_aliked_kpts,
+            "kpts": result.n_kpts,
             "rot_deg": f"{rot_deg:.3f}" if rot_deg is not None else "",
             "t_cm":    f"{t_cm:.3f}"    if t_cm    is not None else "",
             "elapsed_ms": f"{ms:.1f}",

@@ -12,7 +12,7 @@ Differs from sweep_session.py in two ways:
 Usage:
     python -m online.demo.test_images \\
         --bundle  shared/objects/session_1777549127.bundle \\
-        --aliked  shared/models/aliked-n16rot-top1k-640.onnx \\
+        --xfeat   shared/models/xfeat.pt \\
         --in-dir  offline/data/test_images \\
         --out-dir offline/data/test_images_infered \\
         --ref-size 1920x1440
@@ -75,7 +75,7 @@ def scale_K(K_ref: np.ndarray, ref_size: tuple[int, int],
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bundle",   required=True, type=Path)
-    ap.add_argument("--aliked",   required=True, type=Path)
+    ap.add_argument("--xfeat",    required=True, type=Path)
     ap.add_argument("--in-dir",   required=True, type=Path)
     ap.add_argument("--out-dir",  required=True, type=Path)
     ap.add_argument("--ref-size", default="1920x1440",
@@ -90,7 +90,7 @@ def main():
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Loading bundle {args.bundle.name} ...")
-    tracker = PoseTracker(args.bundle, args.aliked,
+    tracker = PoseTracker(args.bundle, args.xfeat,
                           dinov2_onnx=args.dinov2,
                           retrieval_top_n=args.top_n)
     print(f"  M={len(tracker.bundle.points3d):,}  K_refs={len(tracker.bundle.refs)}")
@@ -132,7 +132,7 @@ def main():
             status = [
                 f"{fp.name}  {tgt_w}x{tgt_h}",
                 f"matches={result.n_matches}  inliers={result.n_inliers}  "
-                f"kpts={result.n_aliked_kpts}  ({ms:.0f} ms)",
+                f"kpts={result.n_kpts}  ({ms:.0f} ms)",
             ]
         else:
             status = [
